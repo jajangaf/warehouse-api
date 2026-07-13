@@ -3,11 +3,15 @@ package main
 import (
 	"context"
 	"log"
+	"time"
 	"warehouse-api/pkg/database"
 )
 
 func main() {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	//ctx := context.Background()
 
 	db, err := database.NewConnection(ctx)
 	if err != nil {
