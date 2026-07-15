@@ -11,8 +11,10 @@ import (
 type Repository interface {
 	GetAll(ctx context.Context) ([]User, error)
 	GetByID(ctx context.Context, id string) (*User, error)
-	Create(ctx context.Context, name, email, password string) (*User, error)
-	Update(ctx context.Context, id, name, email, password string) (*User, error)
+	GetByEmail(ctx context.Context, email string) (*User, error)
+	GetPasswordHashByID(ctx context.Context, id string) (string, error)
+	Create(ctx context.Context, name, email, passwordHash string) (*User, error)
+	Update(ctx context.Context, id, name, email, passwordHash string) (*User, error)
 	Delete(ctx context.Context, id string) error
 }
 
@@ -51,24 +53,51 @@ func (r *userRepository) GetByID(ctx context.Context, id string) (*User, error) 
 	return &user, nil
 }
 
-func (r *userRepository) Create(ctx context.Context, name, email, password string) (*User, error) {
+func (r *userRepository) GetByEmail(ctx context.Context, email string) (*User, error) {
+	var user User
+
+	query := "SELECT id, name, email, password_hash, role, created_at, updated_at FROM users WHERE email=$1"
+	err := r.db.GetContext(ctx, &user, query, email)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, sql.ErrNoRows
+		}
+		return nil, err
+	}
+
+	return &user, nil
+}
+
+func (r *userRepository) GetPasswordHashByID(ctx context.Context, id string) (string, error) {
+	var hash string
+
+	query := "SELECT password_hash FROM users WHERE id=$1"
+	err := r.db.GetContext(ctx, &hash, query, id)
+	if err != nil {
+		return "", err
+	}
+
+	return hash, nil
+}
+
+func (r *userRepository) Create(ctx context.Context, name, email, passwordHash string) (*User, error) {
 	var reg User
 
-	query := `INSERT INTO users (name, email, password) VALUES ($1, $2, $3) RETURNING id, name, role, created_at`
+	query := `INSERT INTO users (name, email, password_hash) VALUES ($1, $2, $3) RETURNING id, name, email, role, created_at, updated_at`
 
-	err := r.db.QueryRowxContext(ctx, query, name, email, password).StructScan(&reg)
+	err := r.db.QueryRowxContext(ctx, query, name, email, passwordHash).StructScan(&reg)
 	if err != nil {
 		return nil, err
 	}
 	return &reg, nil
 }
 
-func (r *userRepository) Update(ctx context.Context, id, name, email, password string) (*User, error) {
+func (r *userRepository) Update(ctx context.Context, id, name, email, passwordHash string) (*User, error) {
 	var user User
 
-	query := `UPDATE users SET name=$1, email=$2, password=$3 WHERE id=$4 RETURNING id, name, email, updated_at`
+	query := `UPDATE users SET name=$1, email=$2, password_hash=$3, updated_at=NOW() WHERE id=$4 RETURNING id, name, email, role, created_at, updated_at`
 
-	err := r.db.QueryRowxContext(ctx, query, name, email, password, id).StructScan(&user)
+	err := r.db.QueryRowxContext(ctx, query, name, email, passwordHash, id).StructScan(&user)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, sql.ErrNoRows
