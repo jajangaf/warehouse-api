@@ -93,6 +93,15 @@ func (s *userService) Update(ctx context.Context, id, name, email, password stri
 		return nil, err
 	}
 
+	existing, err := s.repo.GetByEmail(ctx, email)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+
+	if existing != nil && existing.ID.String() != id {
+		return nil, ErrEmailAlreadyExists
+	}
+
 	if password != "" {
 		hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 		if err != nil {

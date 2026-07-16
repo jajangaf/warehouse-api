@@ -3,16 +3,18 @@ package user
 import (
 	"errors"
 	"net/http"
+	"warehouse-api/internal/auth"
 
 	"github.com/gin-gonic/gin"
 )
 
 type Handler struct {
-	service Service
+	service      Service
+	tokenService *auth.TokenService
 }
 
-func NewUserHandler(service Service) *Handler {
-	return &Handler{service: service}
+func NewUserHandler(service Service, tokenService *auth.TokenService) *Handler {
+	return &Handler{service: service, tokenService: tokenService}
 }
 
 func (h *Handler) Register(c *gin.Context) {
@@ -52,7 +54,16 @@ func (h *Handler) Login(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, ToUserResponse(*user))
+	token, err := h.tokenService.Generate(user.ID.String(), user.Role)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"token": token,
+		"user":  ToUserResponse(*user),
+	})
 }
 
 func (h *Handler) GetAll(c *gin.Context) {

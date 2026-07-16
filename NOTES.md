@@ -132,3 +132,99 @@ dulu: verifikasi kredensial valid, return `*User`.
       level request — beda sama timeout connection pool yang udah ada duluan.
       Rencana: timeout middleware, deadline ~5-10 detik, nyambung ke
       pembahasan middleware besok.
+
+## Context: JWT Auth + Middleware (Timeout & RBAC)
+
+### Timeout middleware - kenapa perlu wrap ulang c.Request.Context()
+`c.Request.Context()` default-nya gak punya batas waktu sama sekali - dia
+cuma cancel kalau client disconnect duluan. Kalau query DB hang (bukan
+"ditolak" tapi beneran nge-hang, kayak eksperimen network unreachable
+sebelumnya), handler bisa nunggu selama-lamanya tanpa batas.
+
+Solusinya: middleware yang wrap context request pakai `context.WithTimeout`,
+dipasang global lewat `r.Use(...)`, jalan sebelum handler manapun:
+
+```go
+func Timeout(duration time.Duration) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), duration)
+		defer cancel()
+		c.Request = c.Request.WithContext(ctx)
+
+		done := make(chan struct{})
+		go func() {
+			c.Next()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+		case <-ctx.Done():
+			c.AbortWithStatusJSON(http.StatusGatewayTimeout, gin.H{"error": "request timed out"})
+		}
+	}
+}
+```
+
+Context baru ini otomatis nurun ke semua layer di bawahnya (service,
+repository) karena semua nerima `ctx` yang sama dari `c.Request.Context()`.
+
+### Trade-off: goroutine leak sementara
+Kalau timeout kena, goroutine yang jalanin `c.Next()` **gak langsung mati**.
+Dia tetep jalan di background sampe operasi DB-nya beneran selesai atau
+di-cancel drivernya - meski response `504` udah keburu dikirim ke client.
+Bukan infinite leak (bakal berhenti begitu driver Postgres nangkep context
+cancellation), tapi ada gap waktu goroutine itu masih "hidup". Ini level
+detail yang biasanya baru dioptimasi di production-grade (ada library kayak
+`gin-contrib/timeout` yang nanganin lebih matang). Cukup buat tahap belajar
+sekarang, penting buat disadari limitasinya.
+
+### JWT: kenapa logic generate/parse dipisah dari middleware
+Struktur dibikin 2 layer:
+- **`internal/auth`** - `TokenService` (struct, bukan fungsi package-level)
+  yang nyimpen secret + expiry, expose `Generate()` dan `Parse()`. Dibikin
+  struct biar secret gak jadi global state, dan gampang di-mock kalau nanti
+  ada unit test.
+- **`internal/middleware`** - `RequireAuth()` makai `TokenService` buat
+  verifikasi header `Authorization: Bearer <token>`, taro `user_id` & `role`
+  ke `gin.Context` biar bisa diakses handler/middleware berikutnya.
+
+Pemisahan ini biar `auth` package testable sendiri tanpa perlu HTTP context
+sama sekali, dan middleware cuma jadi "adapter" yang nyambungin HTTP layer
+ke logic auth.
+
+### Kenapa alg confusion check penting di Parse()
+```go
+if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+    return nil, ErrInvalidToken
+}
+```
+Tanpa cek ini, penyerang bisa nyoba forge token pakai algoritma lain
+(misal `none` atau RSA) yang gak tervalidasi bener sama secret HMAC kita.
+Validasi signing method itu wajib, bukan opsional.
+
+### RBAC: RequireAuth vs RequireRole - urutan penting
+`RequireRole()` **harus** dipasang setelah `RequireAuth()` di middleware
+chain, karena dia baca role dari `gin.Context` yang di-set sama
+`RequireAuth()`. Kalau kebalik urutannya, `RequireRole` bakal selalu gagal
+(gak nemu role di context).
+
+```go
+users.Use(middleware.RequireAuth(tokenService))     // set context dulu
+users.DELETE("/:id", middleware.RequireRole("admin"), h.Delete) // baru cek role
+```
+
+Dites manual: register -> login (dapet token) -> GET /users tanpa token
+(401) -> GET /users pake token (200). Semua jalan sesuai ekspektasi.
+
+### TODO lanjutan
+- [ ] Test RBAC end-to-end: DELETE /users/:id pakai token role "staff",
+      harus dapet 403 Forbidden (bukan 401) - RequireAuth lolos tapi
+      RequireRole nolak.
+- [ ] PUT /users/:id belum ada cek "user cuma boleh update dirinya sendiri"
+      - staff bisa update user lain sekarang, selama dia login. Perlu
+      dibandingin id di token (user_id dari context) vs id di URL param.
+- [ ] Refresh token belum ada. Token expiry 24 jam, kalau habis user harus
+      login ulang dari nol. Perlu dipikirin nanti kalau mau UX lebih baik.
+- [ ] JWT_SECRET masih di-export manual tiap buka terminal baru. Rencana:
+      pindah ke `.env` + `godotenv` biar gak perlu export ulang tiap sesi.
