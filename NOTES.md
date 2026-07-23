@@ -228,3 +228,68 @@ Dites manual: register -> login (dapet token) -> GET /users tanpa token
       login ulang dari nol. Perlu dipikirin nanti kalau mau UX lebih baik.
 - [ ] JWT_SECRET masih di-export manual tiap buka terminal baru. Rencana:
       pindah ke `.env` + `godotenv` biar gak perlu export ulang tiap sesi.
+
+## Context: Product module - desain awal (migration, model, dto)
+
+### Kenapa stock/quantity gak ditaro di tabel product
+Table `products` sengaja cuma nyimpen data statis (nama, harga, deskripsi).
+Stock/quantity itu concern-nya module `inventory` nanti (transaksi
+masuk/keluar barang, locking, transaction isolation - inget itu emang
+learning goal utama proyek ini). Kalau digabung di `products`, bakal
+bentrok desain pas `inventory` module dibikin.
+
+### NUMERIC buat kolom harga, bukan FLOAT
+```sql
+price NUMERIC(12,2) NOT NULL CHECK (price >= 0)
+```
+Duit gak boleh pakai floating point karena ada rounding error. `NUMERIC` di
+Postgres itu fixed-point decimal, presisi eksak. Konsekuensinya di Go:
+field `Price` di struct `Product` juga gak boleh `int` atau `float64` -
+dipakai `string` biar presisi asli dari DB gak ke-truncate. Nanti kalau
+butuh kalkulasi matematis (diskon, total harga), baru diparse ke tipe
+decimal yang proper di service layer.
+
+### created_at/updated_at vs created_by/updated_by - beda konsep
+`created_at`/`updated_at` itu soal **kapan**, hampir selalu berguna berdua
+buat audit. `created_by`/`updated_by` itu soal **siapa**, dan itu keputusan
+desain terpisah tergantung kebutuhan tracking. Buat `products`, keduanya
+dipakai karena warehouse butuh audit trail siapa nambah/ubah produk (harga
+berubah, misalnya - penting buat ditrack siapa yang ubah).
+
+### uuid.NullUUID buat FK yang nullable
+`updated_by` di migration sengaja **nullable** (`REFERENCES users(id)` tanpa
+`NOT NULL`) - produk baru belum pernah di-update. Tapi `uuid.UUID` polos di
+Go gak bisa nampung NULL (jadi zero-value UUID yang ambigu). Solusinya pakai
+`uuid.NullUUID`, sama pola kayak `sql.NullString`/`sql.NullTime`.
+
+```go
+UpdatedBy uuid.NullUUID `db:"updated_by"`
+```
+
+Di response DTO, `uuid.NullUUID` ini di-convert ke `*string` dengan
+`omitempty` - kalau belum pernah di-update, field `updated_by` gak muncul
+sama sekali di JSON (bukan `null` atau string kosong).
+
+### SKU: manual vs auto-generate
+Diputusin **manual** (user input SKU sendiri pas create), bukan
+auto-generate sistem. Alasan: SKU biasanya bukan cuma identifier teknis,
+tapi bagian dari proses bisnis nyata (labeling fisik, barcode, laporan
+gudang) - operator warehouse yang paling ngerti skema penomoran yang cocok
+buat mereka. Sistem yang generate SKU asal-asalan sering gak match sama
+cara tim gudang mikir. Keamanan dari duplikat SKU diserahkan ke DB
+constraint (`UNIQUE NOT NULL`), sama pola kayak cek duplicate email di user
+module.
+
+`UpdateRequest` sengaja **gak** include SKU - SKU jarang berubah setelah
+produk dibuat karena itu identifier buat tracking fisik barang.
+
+### TODO lanjutan
+- [ ] `binding:"required"` di field `Price string` cuma mastiin string gak
+      kosong, BUKAN mastiin formatnya angka valid. Kalau user kirim
+      `"price": "abc"`, lolos validasi Gin tapi bakal meledak pas diparse
+      ke angka atau nyangkut di `CHECK (price >= 0)` level DB. Validasi
+      format angka perlu ditambah di service layer.
+- [ ] Lanjut `repository.go` buat product - pola CRUD standar tapi perlu
+      diinget: `created_by` diambil dari JWT context (user_id yang login),
+      BUKAN dari request body - biar user gak bisa fake "dibuat oleh admin"
+      padahal dianya staff.
