@@ -293,3 +293,27 @@ produk dibuat karena itu identifier buat tracking fisik barang.
       diinget: `created_by` diambil dari JWT context (user_id yang login),
       BUKAN dari request body - biar user gak bisa fake "dibuat oleh admin"
       padahal dianya staff.
+
+## Context: Product repository - replikasi pola dari user, plus bug baru
+
+### Bug paling kritis: UPDATE tanpa WHERE clause
+Draft awal `Update()` gak punya `WHERE id=$4` sama sekali:
+```go
+// BAHAYA: ini bakal update SEMUA row di tabel products
+query := `UPDATE products SET name=$1, description=$2, price=$3
+    WHERE ... -- ini tadinya kosong
+    RETURNING ...`
+```
+Kalau ini kejalanin, semua produk di tabel bakal ke-timpa jadi data yang
+sama. Ini paling parah dari semua bug yang pernah ditemuin sejauh ini di
+proyek ini - jenis kesalahan yang bisa ngerusak seluruh data produksi kalau
+lolos ke deployment beneran. Fix: selalu tambahin `WHERE id=$N` di query
+UPDATE/DELETE, dan sebelum run beneran, cek ulang setiap query yang
+mengubah data - jangan cuma cek yang SELECT.
+
+### Interface dan implementasi harus sinkron persis
+Sempat kejadian: interface (`Repository`) masih versi lama, implementasi
+udah diubah nambah parameter baru. Compile error muncul karena Go itu
+strict - struct dianggap "implement" interface HANYA kalau semua method
+(nama, parameter, return type) cocok PERSIS. Kalau nambah/ubah parameter di
+implementasi,
